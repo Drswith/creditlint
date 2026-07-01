@@ -24,12 +24,12 @@ jobs:
 
       - uses: anomalyco/opencode/github@77fc88c8ade8e5a620ebbe1197f3a572d29ae91a
         env:
-          OPENAI_BASE_URL: ${{ secrets.OPENAI_BASE_URL }}
-          OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+          GLM_BASE_URL: ${{ secrets.GLM_BASE_URL }}
+          GLM_API_KEY: ${{ secrets.GLM_API_KEY }}
           OPENCODE_CONFIG_CONTENT: >-
-            {"provider":{"openai":{"options":{"baseURL":"{env:OPENAI_BASE_URL}","apiKey":"{env:OPENAI_API_KEY}"}}}}
+            {"provider":{"glm":{"npm":"@ai-sdk/openai-compatible","name":"GLM Gateway","options":{"baseURL":"{env:GLM_BASE_URL}","apiKey":"{env:GLM_API_KEY}"},"models":{"glm-5.2":{"name":"GLM 5.2"}}}}}
         with:
-          model: openai/gpt-5.5
+          model: glm/glm-5.2
           prompt: |
             You are a deep bug-finding automation focused on high-severity issues.
 
