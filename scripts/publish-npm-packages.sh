@@ -192,6 +192,42 @@ fi
 pnpm install --frozen-lockfile
 pnpm --filter creditlint test
 
+# npm publish (required for npm trusted publishing via OIDC) does not rewrite
+# pnpm's workspace: protocol to concrete versions because this workspace is
+# declared in pnpm-workspace.yaml rather than npm's package.json "workspaces"
+# field. Publishing "workspace:0.1.2" verbatim makes the package uninstallable
+# for consumers (npm error EUNSUPPORTEDPROTOCOL). Rewrite the wrapper manifest
+# in place and restore the original on exit so local dev keeps the workspace
+# protocol.
+wrapper_manifest="packages/creditlint/package.json"
+original_manifest=""
+restore_wrapper_manifest() {
+  if [ -n "$original_manifest" ] && [ -f "$original_manifest" ]; then
+    cp "$original_manifest" "$wrapper_manifest"
+    rm -f "$original_manifest"
+  fi
+}
+if [ -f "$wrapper_manifest" ]; then
+  original_manifest="$(mktemp)"
+  cp "$wrapper_manifest" "$original_manifest"
+  trap restore_wrapper_manifest EXIT
+  node - "$wrapper_manifest" <<'NODE'
+const fs = require("node:fs");
+const manifestPath = process.argv[2];
+const pkg = JSON.parse(fs.readFileSync(manifestPath, "utf8"));
+for (const depType of ["dependencies", "optionalDependencies", "peerDependencies"]) {
+  const deps = pkg[depType];
+  if (!deps) continue;
+  for (const [name, spec] of Object.entries(deps)) {
+    if (typeof spec === "string" && spec.startsWith("workspace:")) {
+      deps[name] = spec.slice("workspace:".length);
+    }
+  }
+}
+fs.writeFileSync(manifestPath, `${JSON.stringify(pkg, null, 2)}\n`);
+NODE
+fi
+
 publish_args=()
 if [ -n "$registry" ]; then
   publish_args+=(--registry "$registry")
