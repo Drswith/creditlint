@@ -20,7 +20,8 @@ impl Default for Policy {
                     kind: RuleKind::ForbiddenTrailer,
                     field_matcher: FieldMatcher::Exact("Co-authored-by".to_string()),
                     value_matcher: ValueMatcher::Pattern(
-                        "(?i)(codex|claude|cursor|copilot|openai|anthropic|gemini|ai)".to_string(),
+                        "(?i)(codex|claude|cursor|copilot|openai|anthropic|gemini|\\bai\\b)"
+                            .to_string(),
                     ),
                     message: "AI/tool authorship marker is not allowed".to_string(),
                 },
@@ -418,6 +419,45 @@ mod tests {
             .expect("analysis should succeed");
 
         assert!(violations.is_empty());
+    }
+
+    #[test]
+    fn default_policy_allows_coauthor_with_ai_substring_in_name_or_email() {
+        let policy = Policy::default();
+        let messages = [
+            "Co-authored-by: Jane Doe <jane@gmail.com>",
+            "Co-authored-by: Kai Smith <kai@example.com>",
+            "Co-authored-by: Claire Jones <claire@example.com>",
+            "Co-authored-by: John Doe <john@mail.example.com>",
+        ];
+
+        for message in messages {
+            let violations = policy
+                .analyze(test_source(), message)
+                .expect("analysis should succeed");
+            assert!(
+                violations.is_empty(),
+                "expected no violations for: {message}"
+            );
+        }
+    }
+
+    #[test]
+    fn default_policy_rejects_standalone_ai_coauthor() {
+        let policy = Policy::default();
+        let messages = [
+            "Co-authored-by: AI <ai@example.com>",
+            "Co-authored-by: ai-bot <ai@example.com>",
+            "Co-authored-by: AI Assistant <ai@example.com>",
+        ];
+
+        for message in messages {
+            let violations = policy
+                .analyze(test_source(), message)
+                .expect("analysis should succeed");
+            assert_eq!(violations.len(), 1, "expected one violation for: {message}");
+            assert_eq!(violations[0].rule_id, "forbidden-ai-coauthor");
+        }
     }
 
     #[test]
