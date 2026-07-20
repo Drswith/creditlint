@@ -19,7 +19,7 @@ rules:
       email_pattern: "(?i)(cursoragent@cursor\\.com|codex|claude|copilot|openai|anthropic|gemini)"
   forbidden_trailers:
     - key: Co-authored-by
-      value_pattern: "(?i)(codex|claude|cursor|copilot|openai|anthropic|gemini|ai)"
+      value_pattern: "(?i)(codex|claude|cursor|copilot|openai|anthropic|gemini|\\bai\\b)"
     - key_pattern: "(?i)^made[- ]with\\b.*$"
     - key_pattern: "(?i)^made[- ]on\\b.*$"
     - key_pattern: "(?i)^generated[- ]with\\b.*$"
