@@ -531,6 +531,64 @@ fn audit_all_reports_violations() {
 }
 
 #[test]
+fn audit_and_range_detect_trailer_after_record_separator_byte() {
+    // Regression: a 0x1e byte (the legacy git log record separator) inside a
+    // commit message must not split the record so that a forbidden trailer is
+    // silently dropped from audit/range analysis.
+    let repo = init_git_repo();
+    write_and_commit(repo.path(), "first.txt", "first\n", "first commit", None);
+
+    let message_path = repo.path().join("commit-message.txt");
+    let mut message = String::from("legit subject");
+    message.push('\u{001e}');
+    message.push('\n');
+    message.push_str("Co-authored-by: Codex <codex@example.com>\n");
+    fs::write(&message_path, message).expect("write message file");
+
+    fs::write(repo.path().join("second.txt"), "second\n").expect("write file");
+    run_git(repo.path(), ["add", "second.txt"]);
+    let status = ProcessCommand::new("git")
+        .current_dir(repo.path())
+        .args(["commit", "-F", message_path.to_str().unwrap()])
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status()
+        .expect("git commit");
+    assert!(status.success(), "git commit should succeed");
+
+    let audit = Command::cargo_bin("creditlint")
+        .expect("binary")
+        .current_dir(repo.path())
+        .args(["audit", "--all", "--format", "json"])
+        .output()
+        .expect("run audit");
+    assert_eq!(audit.status.code(), Some(1), "audit should detect the trailer");
+    let audit_json: Value = serde_json::from_slice(&audit.stdout).expect("audit json");
+    assert_eq!(audit_json["ok"], Value::Bool(false));
+    assert!(
+        audit_json["violations"]
+            .as_array()
+            .map(|v| !v.is_empty())
+            .unwrap_or(false),
+        "audit should report at least one violation"
+    );
+
+    let check = Command::cargo_bin("creditlint")
+        .expect("binary")
+        .current_dir(repo.path())
+        .args(["check", "--range", "HEAD~1..HEAD", "--format", "json"])
+        .output()
+        .expect("run check range");
+    assert_eq!(
+        check.status.code(),
+        Some(1),
+        "check --range should detect the trailer"
+    );
+    let check_json: Value = serde_json::from_slice(&check.stdout).expect("check json");
+    assert_eq!(check_json["ok"], Value::Bool(false));
+}
+
+#[test]
 fn github_ruleset_pattern_exports_default_policy() {
     let repo = make_repo();
 
