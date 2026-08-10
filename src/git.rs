@@ -5,7 +5,12 @@ use std::process::{Command, Stdio};
 use thiserror::Error;
 
 const FIELD_SEPARATOR: char = '\u{001f}';
-const RECORD_SEPARATOR: char = '\u{001e}';
+// NUL (0x00) is used as the record separator because git rejects NUL bytes in
+// commit messages, author identities, and other object fields. Earlier versions
+// used 0x1e (ASCII Record Separator), but git permits 0x1e inside commit
+// message bodies, which let a contributor smuggle a 0x1e byte before a
+// forbidden trailer and split the record so the trailer was silently dropped.
+const RECORD_SEPARATOR: char = '\u{0000}';
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CommitRecord {
@@ -21,7 +26,7 @@ pub fn collect_range_messages(range: &str) -> Result<Vec<CommitRecord>, GitError
     collect_git_messages(
         [
             "log",
-            "--format=%H%x1f%an%x1f%ae%x1f%cn%x1f%ce%x1f%B%x1e",
+            "--format=%H%x1f%an%x1f%ae%x1f%cn%x1f%ce%x1f%B%x00",
             range,
         ],
         range,
@@ -32,7 +37,7 @@ pub fn collect_all_messages() -> Result<Vec<CommitRecord>, GitError> {
     collect_git_messages(
         [
             "log",
-            "--format=%H%x1f%an%x1f%ae%x1f%cn%x1f%ce%x1f%B%x1e",
+            "--format=%H%x1f%an%x1f%ae%x1f%cn%x1f%ce%x1f%B%x00",
             "--all",
         ],
         "--all",
@@ -94,6 +99,7 @@ fn collect_git_messages<const N: usize>(
 #[cfg(test)]
 fn parse_git_log_output(stdout: &str) -> Vec<CommitRecord> {
     parse_git_log_records(stdout.split(RECORD_SEPARATOR).map(str::to_string))
+        .expect("test records should be well-formed")
 }
 
 fn parse_git_log_stream<R: BufRead>(reader: R) -> Result<Vec<CommitRecord>, GitError> {
@@ -105,39 +111,35 @@ fn parse_git_log_stream<R: BufRead>(reader: R) -> Result<Vec<CommitRecord>, GitE
         })
         .collect::<Result<Vec<_>, _>>()?;
 
-    Ok(parse_git_log_records(records))
+    parse_git_log_records(records)
 }
 
-fn parse_git_log_records<I>(records: I) -> Vec<CommitRecord>
+fn parse_git_log_records<I>(records: I) -> Result<Vec<CommitRecord>, GitError>
 where
     I: IntoIterator<Item = String>,
 {
-    records
-        .into_iter()
-        .filter_map(|record| {
-            let trimmed = record.trim_matches('\n');
-            if trimmed.is_empty() {
-                return None;
-            }
+    let mut parsed = Vec::new();
+    for record in records {
+        let trimmed = record.trim_matches('\n');
+        if trimmed.is_empty() {
+            continue;
+        }
 
-            let mut fields = trimmed.splitn(6, FIELD_SEPARATOR);
-            let sha = fields.next()?;
-            let author_name = fields.next()?;
-            let author_email = fields.next()?;
-            let committer_name = fields.next()?;
-            let committer_email = fields.next()?;
-            let message = fields.next()?;
+        let fields: Vec<&str> = trimmed.splitn(6, FIELD_SEPARATOR).collect();
+        if fields.len() < 6 {
+            return Err(GitError::MalformedRecord { record });
+        }
 
-            Some(CommitRecord {
-                sha: sha.to_string(),
-                author_name: author_name.to_string(),
-                author_email: author_email.to_string(),
-                committer_name: committer_name.to_string(),
-                committer_email: committer_email.to_string(),
-                message: message.trim_end_matches('\n').to_string(),
-            })
-        })
-        .collect()
+        parsed.push(CommitRecord {
+            sha: fields[0].to_string(),
+            author_name: fields[1].to_string(),
+            author_email: fields[2].to_string(),
+            committer_name: fields[3].to_string(),
+            committer_email: fields[4].to_string(),
+            message: fields[5].trim_end_matches('\n').to_string(),
+        });
+    }
+    Ok(parsed)
 }
 
 #[derive(Debug, Error)]
@@ -156,18 +158,20 @@ pub enum GitError {
     ReadStderr(#[source] std::io::Error),
     #[error("git output was not valid UTF-8")]
     InvalidUtf8(#[source] std::string::FromUtf8Error),
+    #[error("git log produced a malformed record with fewer than six fields: {record}")]
+    MalformedRecord { record: String },
 }
 
 #[cfg(test)]
 mod tests {
     use std::io::Cursor;
 
-    use super::{parse_git_log_output, parse_git_log_stream};
+    use super::{GitError, parse_git_log_output, parse_git_log_records, parse_git_log_stream};
 
     #[test]
     fn parses_git_log_output_with_record_separator() {
         let parsed = parse_git_log_output(
-            "abc123\u{001f}Jane Doe\u{001f}jane@example.com\u{001f}Creditlint Test\u{001f}creditlint@example.com\u{001f}subject line\nbody line\u{001e}def456\u{001f}John Doe\u{001f}john@example.com\u{001f}Creditlint Test\u{001f}creditlint@example.com\u{001f}second subject\u{001e}",
+            "abc123\u{001f}Jane Doe\u{001f}jane@example.com\u{001f}Creditlint Test\u{001f}creditlint@example.com\u{001f}subject line\nbody line\u{0000}def456\u{001f}John Doe\u{001f}john@example.com\u{001f}Creditlint Test\u{001f}creditlint@example.com\u{001f}second subject\u{0000}",
         );
 
         assert_eq!(parsed.len(), 2);
@@ -184,12 +188,42 @@ mod tests {
     #[test]
     fn parses_git_log_stream_incrementally() {
         let parsed = parse_git_log_stream(Cursor::new(
-            b"abc123\x1fJane Doe\x1fjane@example.com\x1fCreditlint Test\x1fcreditlint@example.com\x1fsubject line\nbody line\x1edef456\x1fJohn Doe\x1fjohn@example.com\x1fCreditlint Test\x1fcreditlint@example.com\x1fsecond subject\x1e".to_vec(),
+            b"abc123\x1fJane Doe\x1fjane@example.com\x1fCreditlint Test\x1fcreditlint@example.com\x1fsubject line\nbody line\x00def456\x1fJohn Doe\x1fjohn@example.com\x1fCreditlint Test\x1fcreditlint@example.com\x1fsecond subject\x00".to_vec(),
         ))
         .expect("parse stream");
 
         assert_eq!(parsed.len(), 2);
         assert_eq!(parsed[0].sha, "abc123");
         assert_eq!(parsed[1].sha, "def456");
+    }
+
+    #[test]
+    fn parse_keeps_record_separator_byte_inside_message_body() {
+        // A 0x1e byte (the legacy record separator) inside a commit message
+        // must be treated as message content, not a record boundary.
+        let parsed = parse_git_log_output(
+            "abc123\u{001f}Jane Doe\u{001f}jane@example.com\u{001f}Creditlint Test\u{001f}creditlint@example.com\u{001f}subject\u{001e}Co-authored-by: Codex <codex@example.com>\u{0000}",
+        );
+
+        assert_eq!(parsed.len(), 1);
+        assert_eq!(parsed[0].sha, "abc123");
+        assert!(
+            parsed[0]
+                .message
+                .contains("Co-authored-by: Codex <codex@example.com>"),
+            "forbidden trailer must remain in the analyzed message body"
+        );
+    }
+
+    #[test]
+    fn parse_fails_closed_on_malformed_record() {
+        let result = parse_git_log_records(std::iter::once(
+            "abc123\u{001f}Jane Doe\u{001f}jane@example.com".to_string(),
+        ));
+
+        assert!(matches!(
+            result,
+            Err(GitError::MalformedRecord { .. }),
+        ), "records with fewer than six fields should fail closed");
     }
 }
