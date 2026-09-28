@@ -203,6 +203,32 @@ if [ "${#access_args[@]}" -gt 0 ]; then
   publish_args+=("${access_args[@]}")
 fi
 
+# npm publish does not replace pnpm's workspace: protocol versions the way
+# pnpm publish does. Strip them so the published package.json has concrete
+# version ranges that npm can resolve at install time.
+strip_workspace_protocol() {
+  node "$(dirname "${BASH_SOURCE[0]}")/strip-workspace-protocol.js" "$1"
+}
+
+backup_files=()
+restore_package_json() {
+  for backup in "${backup_files[@]}"; do
+    if [ -f "$backup" ]; then
+      mv "$backup" "${backup%.bak}"
+    fi
+  done
+}
+trap restore_package_json EXIT
+
+for package in "${packages[@]}"; do
+  pkg_json="packages/$package/package.json"
+  if [ -f "$pkg_json" ]; then
+    cp "$pkg_json" "$pkg_json.bak"
+    backup_files+=("$pkg_json.bak")
+    strip_workspace_protocol "$pkg_json"
+  fi
+done
+
 for package in "${packages[@]}"; do
   echo "publishing $package (${mode})"
   (cd "packages/$package" && npm publish "${publish_args[@]}")
