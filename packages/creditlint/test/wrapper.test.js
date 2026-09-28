@@ -146,3 +146,49 @@ test("supported platform without native binary reports missing optional package"
     fs.rmSync(tempDir, { recursive: true, force: true });
   }
 });
+
+test("strip-workspace-protocol replaces workspace: prefixes with concrete versions", () => {
+  const { stripWorkspaceProtocol, stripWorkspaceProtocolFile } = require("../../../scripts/strip-workspace-protocol.js");
+
+  const stripped = stripWorkspaceProtocol({
+    optionalDependencies: {
+      "creditlint-darwin-arm64": "workspace:0.1.2",
+      "creditlint-darwin-x64": "workspace:^1.0.0",
+      "creditlint-linux-arm64": "workspace:*",
+    },
+    dependencies: {
+      "normal-dep": "^2.0.0",
+    },
+  });
+
+  assert.equal(stripped.optionalDependencies["creditlint-darwin-arm64"], "0.1.2");
+  assert.equal(stripped.optionalDependencies["creditlint-darwin-x64"], "^1.0.0");
+  assert.equal(stripped.optionalDependencies["creditlint-linux-arm64"], "*");
+  assert.equal(stripped.dependencies["normal-dep"], "^2.0.0");
+});
+
+test("strip-workspace-protocol file writes concrete versions to disk", () => {
+  const { stripWorkspaceProtocolFile } = require("../../../scripts/strip-workspace-protocol.js");
+  const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "creditlint-strip-"));
+  const pkgPath = path.join(tempDir, "package.json");
+
+  try {
+    fs.writeFileSync(
+      pkgPath,
+      JSON.stringify({
+        name: "test-pkg",
+        version: "1.0.0",
+        optionalDependencies: {
+          "creditlint-darwin-arm64": "workspace:1.0.0",
+        },
+      }),
+    );
+
+    stripWorkspaceProtocolFile(pkgPath);
+
+    const result = JSON.parse(fs.readFileSync(pkgPath, "utf8"));
+    assert.equal(result.optionalDependencies["creditlint-darwin-arm64"], "1.0.0");
+  } finally {
+    fs.rmSync(tempDir, { recursive: true, force: true });
+  }
+});
