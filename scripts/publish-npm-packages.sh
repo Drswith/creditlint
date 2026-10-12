@@ -192,6 +192,23 @@ fi
 pnpm install --frozen-lockfile
 pnpm --filter creditlint test
 
+# Stage the wrapper manifest with concrete optionalDependency versions.
+#
+# The source package.json uses the pnpm `workspace:` protocol so local
+# development links the workspace platform packages. This script publishes with
+# `npm publish` (for npm trusted publishing via OIDC), and unlike `pnpm publish`
+# it does NOT rewrite `workspace:` references. Shipping `workspace:0.1.2` to
+# the registry makes the wrapper uninstallable: `npm install creditlint` fails
+# with EUNSUPPORTEDPROTOCOL. rewriteOptionalDependencies replaces each entry
+# with the wrapper's own concrete version before publishing.
+wrapper_stage_dir="$(mktemp -d "${TMPDIR:-/tmp}/creditlint-wrapper.XXXXXX")"
+cleanup_wrapper_stage() {
+  rm -rf "$wrapper_stage_dir"
+}
+trap cleanup_wrapper_stage EXIT
+node "$repo_root/scripts/stage-wrapper-package.js" \
+  "$repo_root/packages/creditlint" "$wrapper_stage_dir"
+
 publish_args=()
 if [ -n "$registry" ]; then
   publish_args+=(--registry "$registry")
@@ -205,5 +222,9 @@ fi
 
 for package in "${packages[@]}"; do
   echo "publishing $package (${mode})"
-  (cd "packages/$package" && npm publish "${publish_args[@]}")
+  if [ "$package" = "creditlint" ]; then
+    (cd "$wrapper_stage_dir" && npm publish "${publish_args[@]}")
+  else
+    (cd "packages/$package" && npm publish "${publish_args[@]}")
+  fi
 done

@@ -13,6 +13,10 @@ const {
   platformPackageName,
   resolveBinary,
 } = require("../bin/creditlint.js");
+const {
+  rewriteOptionalDependencies,
+  stageWrapperPackage,
+} = require("../../../scripts/stage-wrapper-package.js");
 
 function makeFakeBinary() {
   const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "creditlint-wrapper-"));
@@ -145,4 +149,61 @@ test("supported platform without native binary reports missing optional package"
   } finally {
     fs.rmSync(tempDir, { recursive: true, force: true });
   }
+});
+
+test("staged wrapper manifest never ships workspace: protocol references", () => {
+  const sourceDir = path.resolve(__dirname, "..");
+  const stageDir = fs.mkdtempSync(path.join(os.tmpdir(), "creditlint-stage-"));
+
+  try {
+    stageWrapperPackage(sourceDir, stageDir);
+
+    const staged = JSON.parse(
+      fs.readFileSync(path.join(stageDir, "package.json"), "utf8"),
+    );
+
+    assert.ok(staged.optionalDependencies, "wrapper must declare optionalDependencies");
+    for (const [name, spec] of Object.entries(staged.optionalDependencies)) {
+      assert.equal(
+        typeof spec,
+        "string",
+        `${name} optionalDependency version must be a string`,
+      );
+      assert.ok(
+        !String(spec).startsWith("workspace:"),
+        `${name} must not use the workspace: protocol in published manifest (got ${spec})`,
+      );
+      assert.ok(
+        /^\d+\.\d+\.\d+[-+0-9A-Za-z.\-]*$/.test(String(spec)),
+        `${name} must be a concrete semver version in published manifest (got ${spec})`,
+      );
+    }
+
+    assert.ok(
+      fs.existsSync(path.join(stageDir, "bin", "creditlint.js")),
+      "staged wrapper must include the bin entry",
+    );
+  } finally {
+    fs.rmSync(stageDir, { recursive: true, force: true });
+  }
+});
+
+test("rewriteOptionalDependencies rewrites workspace: refs to the manifest version", () => {
+  const manifest = {
+    name: "creditlint",
+    version: "0.1.2",
+    optionalDependencies: {
+      "creditlint-darwin-arm64": "workspace:0.1.2",
+      "creditlint-linux-x64": "workspace:^0.1.0",
+      "creditlint-windows-x64": "0.1.2",
+    },
+  };
+
+  const rewritten = rewriteOptionalDependencies(structuredClone(manifest));
+
+  assert.deepEqual(rewritten.optionalDependencies, {
+    "creditlint-darwin-arm64": "0.1.2",
+    "creditlint-linux-x64": "0.1.2",
+    "creditlint-windows-x64": "0.1.2",
+  });
 });
