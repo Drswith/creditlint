@@ -531,8 +531,37 @@ fn audit_all_reports_violations() {
 }
 
 #[test]
-fn github_ruleset_pattern_exports_default_policy() {
+fn github_ruleset_pattern_fails_closed_for_default_identity_rules() {
     let repo = make_repo();
+
+    let output = Command::cargo_bin("creditlint")
+        .expect("binary")
+        .current_dir(repo.path())
+        .args(["github", "ruleset-pattern"])
+        .output()
+        .expect("run command");
+
+    assert_eq!(output.status.code(), Some(2));
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("identity rules cannot be enforced"),
+        "stderr should explain the identity ruleset boundary: {stderr}"
+    );
+}
+
+#[test]
+fn github_ruleset_pattern_exports_policy_without_identity_rules() {
+    let repo = make_repo();
+    fs::write(
+        repo.path().join(".creditlint.yml"),
+        r#"version: 1
+rules:
+  forbidden_trailers:
+    - key: Co-authored-by
+      value_pattern: "(?i)(codex|claude|cursor|copilot|openai|anthropic|gemini|ai)"
+"#,
+    )
+    .expect("config");
 
     let output = Command::cargo_bin("creditlint")
         .expect("binary")
@@ -544,7 +573,6 @@ fn github_ruleset_pattern_exports_default_policy() {
     assert_eq!(output.status.code(), Some(0));
     let stdout = String::from_utf8(output.stdout).expect("stdout utf8");
     assert!(stdout.contains("Co\\-authored\\-by"));
-    assert!(stdout.contains("made[- ]with"));
 }
 
 #[test]

@@ -4,6 +4,10 @@ use thiserror::Error;
 use crate::policy::{FieldMatcher, Policy, Rule, RuleKind, ValueMatcher};
 
 pub fn export_ruleset_pattern(policy: &Policy) -> Result<String, RulesetExportError> {
+    if !policy.identity_rules.is_empty() {
+        return Err(RulesetExportError::UnrepresentableIdentityRules);
+    }
+
     for key in &policy.allowed_provenance_keys {
         if policy
             .rules
@@ -146,6 +150,10 @@ struct NormalizedPattern {
 #[derive(Debug, Error)]
 pub enum RulesetExportError {
     #[error(
+        "policy cannot be represented as a GitHub commit-message ruleset regex because Git author and committer identity rules cannot be enforced by commit-message format checks; use repository metadata restrictions or a merge bot for identity enforcement"
+    )]
+    UnrepresentableIdentityRules,
+    #[error(
         "policy cannot be represented safely as a single GitHub ruleset regex because allowed provenance key `{key}` overlaps a forbidden rule; use merge-bot validation for final squash messages"
     )]
     OverlappingAllowedProvenanceKey { key: String },
@@ -161,12 +169,82 @@ mod tests {
     use crate::policy::{FieldMatcher, Policy, Rule, RuleKind, ValueMatcher};
 
     #[test]
-    fn exports_default_policy_to_single_regex() {
-        let pattern = export_ruleset_pattern(&Policy::default()).expect("export pattern");
+    fn exports_policy_without_identity_rules_to_single_regex() {
+        let policy = Policy {
+            rules: vec![
+                Rule {
+                    id: "forbidden-ai-coauthor".to_string(),
+                    kind: RuleKind::ForbiddenTrailer,
+                    field_matcher: FieldMatcher::Exact("Co-authored-by".to_string()),
+                    value_matcher: ValueMatcher::Pattern(
+                        "(?i)(codex|claude|cursor|copilot|openai|anthropic|gemini|ai)".to_string(),
+                    ),
+                    message: "AI/tool authorship marker is not allowed".to_string(),
+                },
+                Rule {
+                    id: "forbidden-made-with-marker".to_string(),
+                    kind: RuleKind::FreeformMarker,
+                    field_matcher: FieldMatcher::Any,
+                    value_matcher: ValueMatcher::Pattern("(?i)^made[- ]with\\b.*$".to_string()),
+                    message: "Made-with credit marker is not allowed".to_string(),
+                },
+                Rule {
+                    id: "forbidden-generated-with-marker".to_string(),
+                    kind: RuleKind::FreeformMarker,
+                    field_matcher: FieldMatcher::Any,
+                    value_matcher: ValueMatcher::Pattern(
+                        "(?i)^generated[- ]with\\b.*$".to_string(),
+                    ),
+                    message: "Generated-with credit marker is not allowed".to_string(),
+                },
+            ],
+            identity_rules: vec![],
+            allowed_provenance_keys: vec![
+                "AI-Assisted".to_string(),
+                "Tool-Used".to_string(),
+                "Generated-by".to_string(),
+            ],
+        };
+        let pattern = export_ruleset_pattern(&policy).expect("export pattern");
 
         assert!(pattern.contains("Co\\-authored\\-by"));
         assert!(pattern.contains("made[- ]with"));
         assert!(pattern.contains("generated[- ]with"));
+    }
+
+    #[test]
+    fn default_policy_fails_closed_for_identity_rules() {
+        let error = export_ruleset_pattern(&Policy::default())
+            .expect_err("identity rules must fail closed");
+        assert!(
+            error
+                .to_string()
+                .contains("identity rules cannot be enforced")
+        );
+    }
+
+    #[test]
+    fn fails_closed_when_identity_rules_present() {
+        use crate::policy::{IdentityRoleMatcher, IdentityRule};
+
+        let policy = Policy {
+            rules: vec![],
+            identity_rules: vec![IdentityRule {
+                id: "forbidden-author-agent".to_string(),
+                role_matcher: IdentityRoleMatcher::Any,
+                name_pattern: Some("(?i)agent".to_string()),
+                email_pattern: None,
+                message: "agent identity is not allowed".to_string(),
+            }],
+            allowed_provenance_keys: vec![],
+        };
+
+        let error = export_ruleset_pattern(&policy).expect_err("identity rules must fail closed");
+        assert!(
+            error
+                .to_string()
+                .contains("identity rules cannot be enforced")
+        );
     }
 
     #[test]
