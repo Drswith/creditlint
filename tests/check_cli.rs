@@ -531,6 +531,94 @@ fn audit_all_reports_violations() {
 }
 
 #[test]
+fn audit_all_detects_trailer_after_embedded_record_separator() {
+    let repo = init_git_repo();
+    write_and_commit(repo.path(), "first.txt", "first\n", "first commit", None);
+
+    fs::write(repo.path().join("second.txt"), "second\n").expect("write file");
+    run_git(repo.path(), ["add", "second.txt"]);
+
+    let msg_path = repo.path().join("commit-msg.txt");
+    fs::write(
+        &msg_path,
+        "feat: add feature\u{001e}\n\nCo-authored-by: Codex <codex@example.com>\n",
+    )
+    .expect("write commit message");
+
+    let status = ProcessCommand::new("git")
+        .current_dir(repo.path())
+        .args(["commit", "-F", msg_path.to_str().unwrap()])
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status()
+        .expect("git commit");
+    assert!(status.success(), "git commit should succeed");
+
+    let output = Command::cargo_bin("creditlint")
+        .expect("binary")
+        .current_dir(repo.path())
+        .args(["audit", "--all", "--format", "json"])
+        .output()
+        .expect("run command");
+
+    assert_eq!(
+        output.status.code(),
+        Some(1),
+        "embedded record separator must not bypass audit"
+    );
+    let json: Value = serde_json::from_slice(&output.stdout).expect("json output");
+    assert_eq!(json["ok"], Value::Bool(false));
+    assert_eq!(
+        json["violations"][0]["rule_id"],
+        "forbidden-ai-coauthor"
+    );
+}
+
+#[test]
+fn check_range_detects_trailer_after_embedded_record_separator() {
+    let repo = init_git_repo();
+    write_and_commit(repo.path(), "first.txt", "first\n", "first commit", None);
+
+    fs::write(repo.path().join("second.txt"), "second\n").expect("write file");
+    run_git(repo.path(), ["add", "second.txt"]);
+
+    let msg_path = repo.path().join("commit-msg.txt");
+    fs::write(
+        &msg_path,
+        "feat: add feature\u{001e}\n\nCo-authored-by: Codex <codex@example.com>\n",
+    )
+    .expect("write commit message");
+
+    let status = ProcessCommand::new("git")
+        .current_dir(repo.path())
+        .args(["commit", "-F", msg_path.to_str().unwrap()])
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status()
+        .expect("git commit");
+    assert!(status.success(), "git commit should succeed");
+
+    let output = Command::cargo_bin("creditlint")
+        .expect("binary")
+        .current_dir(repo.path())
+        .args(["check", "--range", "HEAD~1..HEAD", "--format", "json"])
+        .output()
+        .expect("run command");
+
+    assert_eq!(
+        output.status.code(),
+        Some(1),
+        "embedded record separator must not bypass range check"
+    );
+    let json: Value = serde_json::from_slice(&output.stdout).expect("json output");
+    assert_eq!(json["ok"], Value::Bool(false));
+    assert_eq!(
+        json["violations"][0]["rule_id"],
+        "forbidden-ai-coauthor"
+    );
+}
+
+#[test]
 fn github_ruleset_pattern_exports_default_policy() {
     let repo = make_repo();
 
