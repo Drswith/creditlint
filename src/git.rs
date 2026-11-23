@@ -1,11 +1,18 @@
-use std::io::{BufRead, BufReader, Read};
+use std::io::{BufReader, Read};
 use std::path::PathBuf;
 use std::process::{Command, Stdio};
 
 use thiserror::Error;
 
-const FIELD_SEPARATOR: char = '\u{001f}';
-const RECORD_SEPARATOR: char = '\u{001e}';
+/// NUL byte used by `git log -z` to separate commit records.
+///
+/// Git object content (commit messages, author names, author emails) can
+/// never contain a NUL byte, so a contributor cannot forge this separator
+/// by embedding control bytes in their commit message — unlike the previous
+/// `\x1e`/`\x1f` separators which could appear in commit bodies and silently
+/// split records to bypass policy checks.
+const RECORD_SEPARATOR: u8 = 0;
+const FIELDS_PER_RECORD: usize = 6;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CommitRecord {
@@ -21,7 +28,8 @@ pub fn collect_range_messages(range: &str) -> Result<Vec<CommitRecord>, GitError
     collect_git_messages(
         [
             "log",
-            "--format=%H%x1f%an%x1f%ae%x1f%cn%x1f%ce%x1f%B%x1e",
+            "-z",
+            "--format=%H%n%an%n%ae%n%cn%n%ce%n%B",
             range,
         ],
         range,
@@ -32,7 +40,8 @@ pub fn collect_all_messages() -> Result<Vec<CommitRecord>, GitError> {
     collect_git_messages(
         [
             "log",
-            "--format=%H%x1f%an%x1f%ae%x1f%cn%x1f%ce%x1f%B%x1e",
+            "-z",
+            "--format=%H%n%an%n%ae%n%cn%n%ce%n%B",
             "--all",
         ],
         "--all",
@@ -92,52 +101,60 @@ fn collect_git_messages<const N: usize>(
 }
 
 #[cfg(test)]
-fn parse_git_log_output(stdout: &str) -> Vec<CommitRecord> {
-    parse_git_log_records(stdout.split(RECORD_SEPARATOR).map(str::to_string))
+fn parse_git_log_output(stdout: &str) -> Result<Vec<CommitRecord>, GitError> {
+    parse_git_log_bytes(stdout.as_bytes())
 }
 
-fn parse_git_log_stream<R: BufRead>(reader: R) -> Result<Vec<CommitRecord>, GitError> {
-    let records = reader
-        .split(RECORD_SEPARATOR as u8)
-        .map(|chunk| {
-            let bytes = chunk.map_err(GitError::ReadStdout)?;
-            String::from_utf8(bytes).map_err(GitError::InvalidUtf8)
-        })
-        .collect::<Result<Vec<_>, _>>()?;
+fn parse_git_log_stream<R: Read>(reader: R) -> Result<Vec<CommitRecord>, GitError> {
+    let mut bytes = Vec::new();
+    BufReader::new(reader)
+        .read_to_end(&mut bytes)
+        .map_err(GitError::ReadStdout)?;
 
-    Ok(parse_git_log_records(records))
+    parse_git_log_bytes(&bytes)
 }
 
-fn parse_git_log_records<I>(records: I) -> Vec<CommitRecord>
-where
-    I: IntoIterator<Item = String>,
-{
-    records
-        .into_iter()
-        .filter_map(|record| {
-            let trimmed = record.trim_matches('\n');
-            if trimmed.is_empty() {
-                return None;
-            }
+fn parse_git_log_bytes(bytes: &[u8]) -> Result<Vec<CommitRecord>, GitError> {
+    let mut records = Vec::new();
 
-            let mut fields = trimmed.splitn(6, FIELD_SEPARATOR);
-            let sha = fields.next()?;
-            let author_name = fields.next()?;
-            let author_email = fields.next()?;
-            let committer_name = fields.next()?;
-            let committer_email = fields.next()?;
-            let message = fields.next()?;
+    for record_bytes in bytes.split(|&b| b == RECORD_SEPARATOR) {
+        if record_bytes.is_empty() {
+            continue;
+        }
 
-            Some(CommitRecord {
-                sha: sha.to_string(),
-                author_name: author_name.to_string(),
-                author_email: author_email.to_string(),
-                committer_name: committer_name.to_string(),
-                committer_email: committer_email.to_string(),
-                message: message.trim_end_matches('\n').to_string(),
-            })
-        })
-        .collect()
+        let record =
+            String::from_utf8(record_bytes.to_vec()).map_err(GitError::InvalidUtf8)?;
+        let mut fields = record.splitn(FIELDS_PER_RECORD, '\n');
+        let sha = fields.next().ok_or(GitError::MalformedOutput {
+            detail: "missing commit sha field".to_string(),
+        })?;
+        let author_name = fields.next().ok_or(GitError::MalformedOutput {
+            detail: "missing author name field".to_string(),
+        })?;
+        let author_email = fields.next().ok_or(GitError::MalformedOutput {
+            detail: "missing author email field".to_string(),
+        })?;
+        let committer_name = fields.next().ok_or(GitError::MalformedOutput {
+            detail: "missing committer name field".to_string(),
+        })?;
+        let committer_email = fields.next().ok_or(GitError::MalformedOutput {
+            detail: "missing committer email field".to_string(),
+        })?;
+        let message = fields.next().ok_or(GitError::MalformedOutput {
+            detail: "missing commit message field".to_string(),
+        })?;
+
+        records.push(CommitRecord {
+            sha: sha.to_string(),
+            author_name: author_name.to_string(),
+            author_email: author_email.to_string(),
+            committer_name: committer_name.to_string(),
+            committer_email: committer_email.to_string(),
+            message: message.trim_end_matches('\n').to_string(),
+        });
+    }
+
+    Ok(records)
 }
 
 #[derive(Debug, Error)]
@@ -156,6 +173,8 @@ pub enum GitError {
     ReadStderr(#[source] std::io::Error),
     #[error("git output was not valid UTF-8")]
     InvalidUtf8(#[source] std::string::FromUtf8Error),
+    #[error("git log output was malformed: {detail}")]
+    MalformedOutput { detail: String },
 }
 
 #[cfg(test)]
@@ -165,10 +184,11 @@ mod tests {
     use super::{parse_git_log_output, parse_git_log_stream};
 
     #[test]
-    fn parses_git_log_output_with_record_separator() {
+    fn parses_git_log_output_with_nul_record_separator() {
         let parsed = parse_git_log_output(
-            "abc123\u{001f}Jane Doe\u{001f}jane@example.com\u{001f}Creditlint Test\u{001f}creditlint@example.com\u{001f}subject line\nbody line\u{001e}def456\u{001f}John Doe\u{001f}john@example.com\u{001f}Creditlint Test\u{001f}creditlint@example.com\u{001f}second subject\u{001e}",
-        );
+            "abc123\nJane Doe\njane@example.com\nCreditlint Test\ncreditlint@example.com\nsubject line\nbody line\u{0000}def456\nJohn Doe\njohn@example.com\nCreditlint Test\ncreditlint@example.com\nsecond subject\u{0000}",
+        )
+        .expect("parse output");
 
         assert_eq!(parsed.len(), 2);
         assert_eq!(parsed[0].sha, "abc123");
@@ -184,12 +204,64 @@ mod tests {
     #[test]
     fn parses_git_log_stream_incrementally() {
         let parsed = parse_git_log_stream(Cursor::new(
-            b"abc123\x1fJane Doe\x1fjane@example.com\x1fCreditlint Test\x1fcreditlint@example.com\x1fsubject line\nbody line\x1edef456\x1fJohn Doe\x1fjohn@example.com\x1fCreditlint Test\x1fcreditlint@example.com\x1fsecond subject\x1e".to_vec(),
+            b"abc123\nJane Doe\njane@example.com\nCreditlint Test\ncreditlint@example.com\nsubject line\nbody line\x00def456\nJohn Doe\njohn@example.com\nCreditlint Test\ncreditlint@example.com\nsecond subject\x00".to_vec(),
         ))
         .expect("parse stream");
 
         assert_eq!(parsed.len(), 2);
         assert_eq!(parsed[0].sha, "abc123");
         assert_eq!(parsed[1].sha, "def456");
+    }
+
+    #[test]
+    fn embedded_record_separator_byte_in_message_does_not_split_record() {
+        let body_with_separator = "feat: add feature\u{001e}\n\nCo-authored-by: Codex <codex@example.com>";
+        let raw = format!(
+            "abc123\nJane Doe\njane@example.com\nCreditlint Test\ncreditlint@example.com\n{body_with_separator}\u{0000}",
+        );
+
+        let parsed = parse_git_log_output(&raw).expect("parse output");
+
+        assert_eq!(parsed.len(), 1);
+        assert_eq!(parsed[0].sha, "abc123");
+        assert!(parsed[0].message.contains('\u{001e}'));
+        assert!(parsed[0]
+            .message
+            .contains("Co-authored-by: Codex <codex@example.com>"));
+    }
+
+    #[test]
+    fn embedded_field_separator_byte_in_message_does_not_split_record() {
+        let body_with_separator = "feat: add feature\u{001f}Co-authored-by: Codex <codex@example.com>";
+        let raw = format!(
+            "abc123\nJane Doe\njane@example.com\nCreditlint Test\ncreditlint@example.com\n{body_with_separator}\u{0000}",
+        );
+
+        let parsed = parse_git_log_output(&raw).expect("parse output");
+
+        assert_eq!(parsed.len(), 1);
+        assert_eq!(parsed[0].sha, "abc123");
+        assert!(parsed[0]
+            .message
+            .contains("Co-authored-by: Codex <codex@example.com>"));
+    }
+
+    #[test]
+    fn empty_commit_body_is_preserved() {
+        let parsed = parse_git_log_output(
+            "abc123\nJane Doe\njane@example.com\nCreditlint Test\ncreditlint@example.com\n\u{0000}",
+        )
+        .expect("parse output");
+
+        assert_eq!(parsed.len(), 1);
+        assert_eq!(parsed[0].sha, "abc123");
+        assert_eq!(parsed[0].message, "");
+    }
+
+    #[test]
+    fn malformed_record_with_too_few_fields_fails_closed() {
+        let result = parse_git_log_output("abc123\nJane Doe\njane@example.com\u{0000}");
+
+        assert!(result.is_err());
     }
 }
